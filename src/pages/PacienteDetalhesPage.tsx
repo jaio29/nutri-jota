@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { 
   ArrowLeft, User, Phone, Mail, Calendar, Ruler, Weight, Activity, 
-  Plus, FileText, Save, Check, X, ArrowRight 
+  Plus, FileText, Save, Check, X, ArrowRight, Sparkles 
 } from 'lucide-react';
 
 export const PacienteDetalhesPage = () => {
@@ -72,6 +72,14 @@ export const PacienteDetalhesPage = () => {
 
   // Estado para visualização de Plano Alimentar
   const [selectedPlan, setSelectedPlan] = useState<any | null>(null);
+
+  // Estados para Geração do Plano Alimentar via IA e Edição
+  const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [editingPlan, setEditingPlan] = useState<any | null>(null);
+  const [activePlanDay, setActivePlanDay] = useState<string>('Segunda-feira');
+  const [activeViewDay, setActiveViewDay] = useState<string>('Segunda-feira');
 
   // Buscar dados consolidados do paciente
   const fetchPatientData = async () => {
@@ -393,15 +401,296 @@ export const PacienteDetalhesPage = () => {
     setIsConsultModalOpen(true);
   };
 
+  // Criar Plano Alimentar Manualmente
+  const handleCreateManualPlan = () => {
+    const emptyPlan = {
+      plano_semanal: [
+        'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo'
+      ].map(dia => ({
+        dia,
+        refeicoes: {
+          cafe_da_manha: ['', '', '', '', ''],
+          lanche_manha: ['', '', '', '', ''],
+          almoco: ['', '', '', '', ''],
+          lanche_tarde: ['', '', '', '', ''],
+          jantar: ['', '', '', '', '']
+        }
+      }))
+    };
+    setEditingPlan(emptyPlan);
+    setActivePlanDay('Segunda-feira');
+    setPlanError(null);
+  };
+
+  // Gerar Plano Alimentar via IA (Gemini 2.5 Flash)
+  const handleGeneratePlanWithIA = async () => {
+    if (!id || !user) return;
+    
+    setIsGeneratingPlan(true);
+    setPlanError(null);
+    setEditingPlan(null);
+    
+    const messages = [
+      'Buscando dados do paciente...',
+      'Analisando objetivos, patologias e alergias...',
+      'IA calculando cardápio personalizado...',
+      'Estruturando refeições semanais...',
+      'Organizando as opções do cardápio...'
+    ];
+    
+    let msgIndex = 0;
+    setLoadingMessage(messages[0]);
+    const messageInterval = setInterval(() => {
+      msgIndex = (msgIndex + 1) % messages.length;
+      setLoadingMessage(messages[msgIndex]);
+    }, 2500);
+
+    try {
+      const formattedData = `
+Nome: ${nome}
+Sexo: ${sexo || 'Não informado'}
+Idade: ${calculatedAge !== null ? `${calculatedAge} anos` : 'Não informada'}
+Peso de Cadastro: ${pesoInicial ? `${pesoInicial} kg` : 'Não informado'}
+Altura: ${altura ? `${altura} cm` : 'Não informada'}
+IMC: ${imc !== null ? `${imc} kg/m²` : 'Não calculado'}
+Objetivos: ${selectedObjetivos.join(', ') || 'Nenhum'}
+Outros objetivos: ${objetivoTexto || 'Nenhum'}
+Nível de Atividade Física: ${nivelAtividade || 'Não informado'}
+Patologias/Condições de Saúde: ${selectedPatologias.join(', ') || 'Nenhuma'}
+Restrições Alimentares: ${selectedRestricoes.join(', ') || 'Nenhuma'}
+Alergias Alimentares: ${selectedAlergias.join(', ') || 'Nenhuma'}
+Medicamentos: ${medicamentos || 'Nenhum'}
+Suplementos: ${suplementos || 'Nenhum'}
+Quantidade de refeições diárias desejadas: ${refeicoesPorDia || 'Não informado'}
+Consumo de água sugerido: ${litrosAgua ? `${litrosAgua} litros` : 'Não informado'}
+Pratica atividade física: ${praticaAtividade} (${atividadeDescricao || 'Nenhuma'})
+Observações gerais: ${observacoes || 'Nenhuma'}
+`;
+
+      const { data, error: funcError } = await supabase.functions.invoke('gerar-plano', {
+        body: { dados_do_paciente: formattedData }
+      });
+
+      clearInterval(messageInterval);
+
+      if (funcError) {
+        let errorMessage = funcError.message;
+        try {
+          if (funcError.context) {
+            const errBody = await funcError.context.json();
+            errorMessage = errBody.error || errBody.message || JSON.stringify(errBody);
+          }
+        } catch (e) {
+          console.error("Erro ao extrair corpo do erro da Edge Function:", e);
+        }
+        throw new Error(errorMessage);
+      }
+
+      if (!data) {
+        throw new Error("Nenhum dado retornado pela IA.");
+      }
+
+      let parsedPlan: any;
+      if (typeof data === 'string') {
+        parsedPlan = JSON.parse(data);
+      } else {
+        parsedPlan = data;
+      }
+
+      if (!parsedPlan.plano_semanal || !Array.isArray(parsedPlan.plano_semanal)) {
+        throw new Error("O formato do plano retornado pela IA é inválido.");
+      }
+
+      const normalizedPlan = {
+        plano_semanal: parsedPlan.plano_semanal.map((diaItem: any) => {
+          const refeicoes = diaItem.refeicoes || {};
+          const normalizeMeal = (mealOptions: any) => {
+            if (Array.isArray(mealOptions)) {
+              const normalized = [...mealOptions];
+              while (normalized.length < 5) normalized.push('');
+              return normalized.slice(0, 5);
+            }
+            return ['', '', '', '', ''];
+          };
+
+          return {
+            dia: diaItem.dia || 'Dia não especificado',
+            refeicoes: {
+              cafe_da_manha: normalizeMeal(refeicoes.cafe_da_manha || refeicoes.cafe_manha),
+              lanche_manha: normalizeMeal(refeicoes.lanche_manha),
+              almoco: normalizeMeal(refeicoes.almoco),
+              lanche_tarde: normalizeMeal(refeicoes.lanche_tarde),
+              jantar: normalizeMeal(refeicoes.jantar)
+            }
+          };
+        })
+      };
+
+      setEditingPlan(normalizedPlan);
+      setActivePlanDay(normalizedPlan.plano_semanal[0]?.dia || 'Segunda-feira');
+
+    } catch (err: any) {
+      clearInterval(messageInterval);
+      console.error("Erro ao gerar plano alimentar via IA:", err);
+      setPlanError(err.message || "Não foi possível gerar o plano com IA no momento. Deseja tentar novamente ou criar um Plano Manual?");
+    } finally {
+      setIsGeneratingPlan(false);
+    }
+  };
+
+  // Atualizar uma opção específica do plano alimentar ativo em edição
+  const handleUpdateOption = (mealKey: string, optionIndex: number, newValue: string) => {
+    if (!editingPlan) return;
+    
+    const updatedPlan = {
+      ...editingPlan,
+      plano_semanal: editingPlan.plano_semanal.map((d: any) => {
+        if (d.dia === activePlanDay) {
+          return {
+            ...d,
+            refeicoes: {
+              ...d.refeicoes,
+              [mealKey]: d.refeicoes[mealKey].map((opt: string, idx: number) => 
+                idx === optionIndex ? newValue : opt
+              )
+            }
+          };
+        }
+        return d;
+      })
+    };
+    
+    setEditingPlan(updatedPlan);
+  };
+
+  // Salvar Plano Alimentar no Banco de Dados
+  const handleSaveDietaryPlan = async () => {
+    if (!id || !user || !editingPlan) return;
+    
+    setSaving(true);
+    setPlanError(null);
+    
+    try {
+      const payload = {
+        paciente_id: id,
+        conteudo: editingPlan
+      };
+      
+      const { error: insertError } = await supabase
+        .from('planos_alimentares')
+        .insert([payload]);
+        
+      if (insertError) throw insertError;
+      
+      setEditingPlan(null);
+      setSuccess(true);
+      await fetchPatientData();
+      setTimeout(() => setSuccess(false), 3000);
+      
+    } catch (err: any) {
+      console.error("Erro ao salvar plano alimentar:", err);
+      setPlanError(err.message || "Houve um erro ao salvar o plano alimentar.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // Renderizar o conteúdo do plano alimentar
   const renderPlanContent = (content: any) => {
     if (!content) return <i>Sem conteúdo disponível.</i>;
     
     if (typeof content === 'string') {
-      return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
+      try {
+        content = JSON.parse(content);
+      } catch (e) {
+        return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
+      }
     }
     
     try {
+      // Se for a estrutura semanal da IA
+      if (content.plano_semanal && Array.isArray(content.plano_semanal)) {
+        const currentDayData = content.plano_semanal.find((d: any) => d.dia === activeViewDay) || content.plano_semanal[0];
+        if (!currentDayData) return <i>Estrutura do plano vazia.</i>;
+
+        const mealLabels: Record<string, string> = {
+          cafe_da_manha: '☕ Café da Manhã',
+          lanche_manha: '🍏 Lanche da Manhã',
+          almoco: '🍛 Almoço',
+          lanche_tarde: '🍪 Lanche da Tarde',
+          jantar: '🍲 Jantar'
+        };
+
+        return (
+          <div>
+            {/* Abas dos dias no visualizador */}
+            <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #e5e7eb', paddingBottom: '10px', marginBottom: '20px', overflowX: 'auto', paddingLeft: '2px', paddingRight: '2px' }}>
+              {content.plano_semanal.map((d: any) => (
+                <button
+                  key={d.dia}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation(); // Evitar disparar cliques do card pai
+                    setActiveViewDay(d.dia);
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    border: '1px solid',
+                    borderColor: activeViewDay === d.dia ? 'var(--primary-color)' : '#e5e7eb',
+                    backgroundColor: activeViewDay === d.dia ? 'var(--primary-light)' : '#ffffff',
+                    color: activeViewDay === d.dia ? 'var(--primary-color)' : 'var(--text-muted)',
+                    fontSize: '0.9rem',
+                    fontWeight: activeViewDay === d.dia ? 600 : 500,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    transition: 'var(--transition)'
+                  }}
+                >
+                  {d.dia}
+                </button>
+              ))}
+            </div>
+            
+            {/* Refeições do dia selecionado */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '20px' }}>
+              {Object.entries(currentDayData.refeicoes || {}).map(([mealKey, options]: [string, any]) => {
+                if (!Array.isArray(options)) return null;
+                const filledOptions = options.filter(opt => opt && opt.trim() !== '');
+                if (filledOptions.length === 0) return null;
+                
+                return (
+                  <div key={mealKey} style={{ backgroundColor: '#ffffff', border: '1px solid #f3f4f6', borderRadius: '10px', padding: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
+                    <h5 style={{ fontWeight: 600, color: 'var(--primary-color)', marginBottom: '12px', fontSize: '1rem', borderBottom: '1px solid #f3f4f6', paddingBottom: '6px' }}>
+                      {mealLabels[mealKey] || mealKey}
+                    </h5>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {filledOptions.map((option, idx) => (
+                        <div key={idx} style={{ 
+                          fontSize: '0.9rem', 
+                          color: 'var(--text-color)', 
+                          padding: '10px 14px', 
+                          backgroundColor: '#f9fafb', 
+                          border: '1px solid #e5e7eb',
+                          borderRadius: '8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px'
+                        }}>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600 }}>{idx + 1}.</span>
+                          <span style={{ flex: 1 }}>{option}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      }
+
+      // Código legado
       const meals = content.refeicoes || content.meals;
       if (Array.isArray(meals)) {
         return (
@@ -1543,97 +1832,331 @@ export const PacienteDetalhesPage = () => {
       {/* SEÇÃO 3: PLANOS ALIMENTARES */}
       {activeSection === 'planos' && (
         <div style={{ backgroundColor: '#ffffff', border: '1px solid #f3f4f6', borderRadius: '12px', padding: '32px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '12px' }}>
-            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-color)' }}>Planos Alimentares do Paciente</h3>
-            <button 
-              className="btn-primary" 
-              style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px' }}
-            >
-              <Plus size={18} />
-              <span>Gerar Plano Alimentar</span>
-            </button>
-          </div>
-
-          {plans.length === 0 ? (
-            <div style={{
-              border: '1px dashed #e5e7eb',
-              borderRadius: '12px',
-              padding: '40px 20px',
+          
+          {/* Seção de Carregamento (IA) */}
+          {isGeneratingPlan && (
+            <div style={{ 
+              display: 'flex', 
+              flexDirection: 'column', 
+              justifyContent: 'center', 
+              alignItems: 'center', 
+              padding: '60px 20px', 
               textAlign: 'center',
               backgroundColor: '#f9fafb',
-              color: 'var(--text-muted)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '12px'
+              border: '1px dashed var(--primary-color)',
+              borderRadius: '12px',
+              minHeight: '300px',
+              gap: '20px'
             }}>
-              <FileText size={48} style={{ color: '#9ca3af', marginBottom: '4px' }} />
-              <span style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-color)' }}>Nenhum plano alimentar gerado ainda</span>
-              <p style={{ fontSize: '0.9rem', margin: 0, maxWidth: '280px' }}>Você poderá gerar planos alimentares personalizados no próximo passo.</p>
+              <div style={{ 
+                width: '50px', 
+                height: '50px', 
+                border: '4px solid var(--primary-light)', 
+                borderTopColor: 'var(--primary-color)', 
+                borderRadius: '50%', 
+                animation: 'spin 1s linear infinite' 
+              }}></div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <h4 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-color)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
+                  <Sparkles size={18} style={{ color: 'var(--primary-color)' }} />
+                  Gerando Plano com IA
+                </h4>
+                <p style={{ fontSize: '0.95rem', color: 'var(--text-muted)', margin: 0, fontWeight: 500 }}>
+                  {loadingMessage}
+                </p>
+              </div>
             </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              {/* Exibição detalhada do plano selecionado */}
-              {selectedPlan && (
-                <div style={{
-                  backgroundColor: '#f9fafb',
-                  border: '1px solid var(--primary-color)',
-                  borderRadius: '10px',
-                  padding: '24px',
-                  position: 'relative',
-                  boxShadow: '0 4px 10px rgba(46, 125, 50, 0.05)'
-                }}>
-                  <button 
-                    onClick={() => setSelectedPlan(null)}
-                    style={{ position: 'absolute', top: '16px', right: '16px', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+          )}
+
+          {/* Seção do Editor (AI ou Manual) */}
+          {!isGeneratingPlan && editingPlan && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', borderBottom: '1px solid #e5e7eb', paddingBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-color)', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  <Sparkles size={20} style={{ color: 'var(--primary-color)' }} />
+                  <span>Editando Plano Alimentar</span>
+                </h3>
+                <button 
+                  type="button" 
+                  onClick={() => { setEditingPlan(null); setPlanError(null); }}
+                  className="btn-secondary"
+                  style={{ width: 'auto', padding: '8px 16px', fontSize: '0.9rem' }}
+                >
+                  Cancelar
+                </button>
+              </div>
+
+              {planError && (
+                <div className="error-message" style={{ marginBottom: '24px' }}>
+                  <X size={18} />
+                  <span>{planError}</span>
+                </div>
+              )}
+
+              {/* Abas de Dias da Semana no Editor */}
+              <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #e5e7eb', paddingBottom: '10px', marginBottom: '24px', overflowX: 'auto', paddingLeft: '2px', paddingRight: '2px' }}>
+                {editingPlan.plano_semanal.map((d: any) => (
+                  <button
+                    key={d.dia}
+                    type="button"
+                    onClick={() => setActivePlanDay(d.dia)}
+                    style={{
+                      padding: '10px 20px',
+                      borderRadius: '8px',
+                      border: '1px solid',
+                      borderColor: activePlanDay === d.dia ? 'var(--primary-color)' : '#e5e7eb',
+                      backgroundColor: activePlanDay === d.dia ? 'var(--primary-light)' : '#ffffff',
+                      color: activePlanDay === d.dia ? 'var(--primary-color)' : 'var(--text-muted)',
+                      fontSize: '0.95rem',
+                      fontWeight: activePlanDay === d.dia ? 600 : 500,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      transition: 'var(--transition)'
+                    }}
                   >
-                    <X size={20} />
+                    {d.dia}
                   </button>
-                  <h4 style={{ fontWeight: 700, color: 'var(--primary-color)', marginBottom: '16px', fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <FileText size={18} />
-                    Plano Alimentar de {formatDate(selectedPlan.created_at?.split('T')[0])}
-                  </h4>
-                  <div style={{ backgroundColor: '#ffffff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '20px', maxHeight: '350px', overflowY: 'auto' }}>
-                    {renderPlanContent(selectedPlan.conteudo)}
+                ))}
+              </div>
+
+              {/* Refeições do dia ativo em edição */}
+              {(() => {
+                const activeDayData = editingPlan.plano_semanal.find((d: any) => d.dia === activePlanDay);
+                if (!activeDayData) return null;
+
+                const mealKeys = ['cafe_da_manha', 'lanche_manha', 'almoco', 'lanche_tarde', 'jantar'];
+                const mealLabels: Record<string, string> = {
+                  cafe_da_manha: '☕ Café da Manhã',
+                  lanche_manha: '🍏 Lanche da Manhã',
+                  almoco: '🍛 Almoço',
+                  lanche_tarde: '🍪 Lanche da Tarde',
+                  jantar: '🍲 Jantar'
+                };
+
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                    {mealKeys.map((mealKey) => {
+                      const options = activeDayData.refeicoes[mealKey] || ['', '', '', '', ''];
+                      return (
+                        <div key={mealKey} style={{ backgroundColor: '#ffffff', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+                          <h4 style={{ fontWeight: 600, color: 'var(--primary-color)', marginBottom: '16px', fontSize: '1.05rem', borderBottom: '1px solid #f3f4f6', paddingBottom: '8px' }}>
+                            {mealLabels[mealKey]}
+                          </h4>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {options.map((option: string, optIdx: number) => (
+                              <div key={optIdx} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600, width: '60px' }}>
+                                  Opção {optIdx + 1}:
+                                </span>
+                                <input 
+                                  type="text"
+                                  value={option}
+                                  placeholder={`Digite a opção ${optIdx + 1} para esta refeição...`}
+                                  onChange={(e) => handleUpdateOption(mealKey, optIdx, e.target.value)}
+                                  style={{ flex: 1, padding: '10px 14px', fontSize: '0.95rem' }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
+              {/* Ações do Editor */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '16px', marginTop: '32px', paddingTop: '20px', borderTop: '1px solid #f3f4f6' }}>
+                <button 
+                  type="button" 
+                  onClick={() => { setEditingPlan(null); setPlanError(null); }}
+                  className="btn-secondary"
+                  style={{ width: 'auto', padding: '12px 28px' }}
+                >
+                  Descartar
+                </button>
+                <button 
+                  type="button" 
+                  onClick={handleSaveDietaryPlan}
+                  disabled={saving}
+                  className="btn-primary"
+                  style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 32px' }}
+                >
+                  <Save size={16} />
+                  <span>{saving ? 'Salvando...' : 'Salvar Plano Alimentar'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Seção Histórico / Listagem Principal */}
+          {!isGeneratingPlan && !editingPlan && (
+            <div>
+              {/* Notificação amigável de erro de geração anterior */}
+              {planError && (
+                <div style={{ 
+                  backgroundColor: '#fef2f2', 
+                  color: '#ef4444', 
+                  padding: '16px 20px', 
+                  borderRadius: '12px', 
+                  marginBottom: '24px', 
+                  border: '1px solid #fee2e2',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, fontSize: '0.95rem' }}>
+                    <X size={20} style={{ flexShrink: 0 }} />
+                    <span>{planError}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <button
+                      onClick={handleGeneratePlanWithIA}
+                      className="btn-primary"
+                      style={{ width: 'auto', padding: '8px 16px', fontSize: '0.85rem', backgroundColor: '#ef4444' }}
+                    >
+                      Tentar com IA Novamente
+                    </button>
+                    <button
+                      onClick={handleCreateManualPlan}
+                      className="btn-secondary"
+                      style={{ width: 'auto', padding: '8px 16px', fontSize: '0.85rem', borderColor: '#fca5a5', color: '#ef4444' }}
+                    >
+                      Criar Plano Manual
+                    </button>
                   </div>
                 </div>
               )}
 
-              {/* Lista dos planos */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {plans.map((plan) => (
-                  <div 
-                    key={plan.id} 
-                    onClick={() => setSelectedPlan(plan)}
-                    style={{
-                      border: '1px solid #e5e7eb',
-                      borderRadius: '8px',
-                      padding: '16px 20px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      backgroundColor: selectedPlan?.id === plan.id ? 'var(--primary-light)' : '#ffffff',
-                      transition: 'var(--transition)'
-                    }}
-                    className="table-row-hover"
+              {/* Cabeçalho */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px', flexWrap: 'wrap', gap: '16px' }}>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-color)', margin: 0 }}>
+                  Planos Alimentares do Paciente
+                </h3>
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <button 
+                    onClick={handleCreateManualPlan}
+                    className="btn-secondary"
+                    style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px' }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                      <FileText size={22} style={{ color: 'var(--primary-color)' }} />
-                      <div>
-                        <div style={{ fontWeight: 600, color: 'var(--text-color)', fontSize: '0.95rem' }}>
-                          Plano Alimentar de {formatDate(plan.created_at?.split('T')[0])}
-                        </div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                          Gerado em {new Date(plan.created_at).toLocaleDateString('pt-BR')} às {new Date(plan.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                        </div>
+                    <Plus size={18} />
+                    <span>Plano Manual</span>
+                  </button>
+                  <button 
+                    onClick={handleGeneratePlanWithIA}
+                    className="btn-primary" 
+                    style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', backgroundColor: 'var(--primary-color)' }}
+                  >
+                    <Sparkles size={18} />
+                    <span>Gerar Plano com IA</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Lista ou estado vazio */}
+              {plans.length === 0 ? (
+                <div style={{
+                  border: '1px dashed #e5e7eb',
+                  borderRadius: '12px',
+                  padding: '60px 20px',
+                  textAlign: 'center',
+                  backgroundColor: '#f9fafb',
+                  color: 'var(--text-muted)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '12px'
+                }}>
+                  <FileText size={48} style={{ color: '#9ca3af', marginBottom: '4px' }} />
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-color)' }}>
+                    Nenhum plano alimentar gerado ainda
+                  </span>
+                  <p style={{ fontSize: '0.9rem', margin: 0, maxWidth: '340px' }}>
+                    Gere um plano alimentar personalizado em segundos com Inteligência Artificial ou crie um plano manualmente do zero.
+                  </p>
+                  <div style={{ display: 'flex', gap: '12px', marginTop: '12px' }}>
+                    <button 
+                      onClick={handleCreateManualPlan}
+                      className="btn-secondary"
+                      style={{ width: 'auto', padding: '10px 20px' }}
+                    >
+                      Criar Manualmente
+                    </button>
+                    <button 
+                      onClick={handleGeneratePlanWithIA}
+                      className="btn-primary" 
+                      style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px' }}
+                    >
+                      <Sparkles size={18} />
+                      <span>Gerar com IA</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                  {/* Exibição detalhada do plano selecionado */}
+                  {selectedPlan && (
+                    <div style={{
+                      backgroundColor: '#f9fafb',
+                      border: '1px solid var(--primary-color)',
+                      borderRadius: '12px',
+                      padding: '24px',
+                      position: 'relative',
+                      boxShadow: '0 4px 12px rgba(46, 125, 50, 0.05)'
+                    }}>
+                      <button 
+                        onClick={() => setSelectedPlan(null)}
+                        style={{ position: 'absolute', top: '16px', right: '16px', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                      >
+                        <X size={20} />
+                      </button>
+                      <h4 style={{ fontWeight: 700, color: 'var(--primary-color)', marginBottom: '20px', fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FileText size={18} />
+                        Plano Alimentar de {formatDate(selectedPlan.created_at?.split('T')[0])}
+                      </h4>
+                      <div style={{ backgroundColor: '#ffffff', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '20px', maxHeight: '550px', overflowY: 'auto' }}>
+                        {renderPlanContent(selectedPlan.conteudo)}
                       </div>
                     </div>
-                    <ArrowRight size={18} style={{ color: 'var(--primary-color)' }} />
+                  )}
+
+                  {/* Lista dos planos */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {plans.map((plan) => (
+                      <div 
+                        key={plan.id} 
+                        onClick={() => setSelectedPlan(plan)}
+                        style={{
+                          border: '1px solid #e5e7eb',
+                          borderRadius: '10px',
+                          padding: '16px 20px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          backgroundColor: selectedPlan?.id === plan.id ? 'var(--primary-light)' : '#ffffff',
+                          transition: 'var(--transition)'
+                        }}
+                        className="table-row-hover"
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                          <FileText size={22} style={{ color: 'var(--primary-color)' }} />
+                          <div>
+                            <div style={{ fontWeight: 600, color: 'var(--text-color)', fontSize: '0.95rem' }}>
+                              Plano Alimentar de {formatDate(plan.created_at?.split('T')[0])}
+                            </div>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                              Gerado em {new Date(plan.created_at).toLocaleDateString('pt-BR')} às {new Date(plan.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </div>
+                        </div>
+                        <ArrowRight size={18} style={{ color: 'var(--primary-color)' }} />
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
             </div>
           )}
         </div>
